@@ -1,0 +1,5 @@
+{
+  "name": "AI Story Visualizer",
+  "description": "An application that breaks down input text into visual sequences, generates descriptive prompts for each sequence ensuring character consistency, and then generates images for these prompts using AI.",
+  "requestFramePermissions": []
+}
