@@ -1,10 +1,42 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect } from 'react';
 import JSZip from 'jszip';
 import * as FileSaver from 'file-saver';
 import { ProcessedSequence, ImageStyleType, AspectRatioType, StyleOption, AspectRatioOption, GenerationMode, CharacterRace, RaceOption, Character, CharacterSet } from './types';
 import { segmentStoryIntoScenes, generateImagePrompt, generateImageFromPrompt, generateIllustrationConcepts, generateIllustrationPrompt, generateCharacterDescriptions, identifyRelevantCharacters, generateImagePromptWithCharacters, generateIllustrationPromptWithCharacters } from './services/geminiService';
 import SequenceCard from './components/SequenceCard';
 import LoadingSpinner from './components/LoadingSpinner';
+import { useAppDispatch, useAppSelector, useStateReset } from './store/hooks';
+import {
+  setStoryInput,
+  setStoryChunks,
+  setCurrentChunkIndex,
+  incrementChunkIndex,
+  setIsMultiPartStory,
+  setGenerationMode,
+  setIsProcessingGlobal,
+  setProcessingMessage,
+  setGlobalError,
+  clearGlobalError,
+  resetStoryState 
+} from './store/storySlice';
+import {
+  setSequences,
+  addSequences,
+  clearSequences,
+  updateSequence,
+  updateSequencePrompt,
+  updateSequenceStatus,
+  updateSequenceImage,
+  updateMultipleSequences
+} from './store/sequencesSlice';
+import {
+  setSelectedImageStyle,
+  setSelectedAspectRatio,
+  setCharacterRace,
+  setCharacters,
+  clearCharacters,
+  setApiKeyStatus
+} from './store/settingsSlice';
 
 const IMAGE_GENERATION_DELAY_MS = 12500; 
 const MAX_STORY_LENGTH_TOTAL = 50000;
@@ -60,30 +92,40 @@ const raceOptions: RaceOption[] = [
 ];
 
 const App: React.FC = () => {
-  const [storyInput, setStoryInput] = useState<string>('');
-  const [characters, setCharacters] = useState<CharacterSet>([]);
-  const [characterRace, setCharacterRace] = useState<CharacterRace>('any');
-  const [sequences, setSequences] = useState<ProcessedSequence[]>([]);
-  const [globalError, setGlobalError] = useState<string | null>(null);
-  const [isProcessingGlobal, setIsProcessingGlobal] = useState<boolean>(false); // For global actions like generating all prompts or all images
-  const [apiKeyStatus, setApiKeyStatus] = useState<string>('');
-  const [processingMessage, setProcessingMessage] = useState<string>('');
-
-  const [storyChunks, setStoryChunks] = useState<string[]>([]);
-  const [currentChunkIndex, setCurrentChunkIndex] = useState<number>(0);
-  const [isMultiPartStory, setIsMultiPartStory] = useState<boolean>(false);
+  const dispatch = useAppDispatch();
   
-  const [selectedImageStyle, setSelectedImageStyle] = useState<ImageStyleType>('cinematic');
-  const [selectedAspectRatio, setSelectedAspectRatio] = useState<AspectRatioType>('auto');
-  const [generationMode, setGenerationMode] = useState<GenerationMode>('story');
+  // Redux state selectors
+  const {
+    storyInput,
+    storyChunks,
+    currentChunkIndex,
+    isMultiPartStory,
+    generationMode,
+    isProcessingGlobal,
+    processingMessage,
+    globalError
+  } = useAppSelector((state) => state.story);
+  
+  const { sequences } = useAppSelector((state) => state.sequences);
+  
+  const {
+    selectedImageStyle,
+    selectedAspectRatio,
+    characterRace,
+    characters,
+    apiKeyStatus
+  } = useAppSelector((state) => state.settings);
+
+  // Initialize state reset for manual clearing (state now persists across refreshes)
+  const resetState = useStateReset();
 
   useEffect(() => {
     if (!process.env.API_KEY) {
-        setApiKeyStatus("API_KEY is not set. Application functionality will be limited.");
+        dispatch(setApiKeyStatus("API_KEY is not set. Application functionality will be limited."));
     } else {
-        setApiKeyStatus("API Key detected. Ready.");
+        dispatch(setApiKeyStatus("API Key detected. Ready."));
     }
-  }, []);
+  }, [dispatch]);
 
   const splitStoryIntoChunks = (text: string, limit: number): string[] => {
     const chunks: string[] = [];
@@ -106,29 +148,29 @@ const App: React.FC = () => {
   
   const handleProcessStoryAndGeneratePrompts = useCallback(async (storyPartText: string, partNumber: number, totalParts: number) => {
     if (!storyPartText.trim()) {
-      setGlobalError(`Part ${partNumber} is empty. Cannot process.`);
+      dispatch(setGlobalError(`Part ${partNumber} is empty. Cannot process.`));
       if (isMultiPartStory && partNumber < totalParts) {
-        setProcessingMessage(`Part ${partNumber} was empty. Waiting for you to start Part ${partNumber + 1}.`);
+        dispatch(setProcessingMessage(`Part ${partNumber} was empty. Waiting for you to start Part ${partNumber + 1}.`));
       }
       return;
     }
     if (!process.env.API_KEY) {
-      setGlobalError("API Key is missing.");
+      dispatch(setGlobalError("API Key is missing."));
       return;
     }
 
-    setIsProcessingGlobal(true);
-    setGlobalError(null);
-    if (partNumber === 1) setSequences([]); // Clear existing sequences if starting a new story or the first part.
+    dispatch(setIsProcessingGlobal(true));
+    dispatch(clearGlobalError());
+    if (partNumber === 1) dispatch(clearSequences()); // Clear existing sequences if starting a new story or the first part.
     
-    setProcessingMessage(`Part ${partNumber}/${totalParts}: Preparing ${generationMode === 'story' ? 'story scenes' : 'illustration concepts'}...`);
+    dispatch(setProcessingMessage(`Part ${partNumber}/${totalParts}: Preparing ${generationMode === 'story' ? 'story scenes' : 'illustration concepts'}...`));
 
     let currentCharacters = characters;
 
     try {
       // Generate character descriptions if this is the first part and we don't have characters yet
       if (partNumber === 1 && currentCharacters.length === 0) {
-        setProcessingMessage(`Part ${partNumber}/${totalParts}: Identifying characters in the story...`);
+        dispatch(setProcessingMessage(`Part ${partNumber}/${totalParts}: Identifying characters in the story...`));
         try {
           // Use the current story part text instead of joining all chunks
           const storyTextForCharacters = storyPartText || storyChunks.join('\n');
@@ -140,7 +182,7 @@ const App: React.FC = () => {
               ...char,
               race: char.race || characterRace
             }));
-            setCharacters(charactersWithRace);
+            dispatch(setCharacters(charactersWithRace));
             currentCharacters = charactersWithRace;
           }
         } catch (charError) { 
@@ -151,17 +193,17 @@ const App: React.FC = () => {
       // Use different processing based on mode
       let sceneTexts: string[] = [];
       if (generationMode === 'story') {
-        setProcessingMessage(`Part ${partNumber}/${totalParts}: Segmenting story into scenes...`);
+        dispatch(setProcessingMessage(`Part ${partNumber}/${totalParts}: Segmenting story into scenes...`));
         sceneTexts = await segmentStoryIntoScenes(storyPartText);
       } else {
-        setProcessingMessage(`Part ${partNumber}/${totalParts}: Generating illustration concepts...`);
+        dispatch(setProcessingMessage(`Part ${partNumber}/${totalParts}: Generating illustration concepts...`));
         sceneTexts = await generateIllustrationConcepts(storyPartText);
       }
       
       if (sceneTexts.length === 0) {
-        setGlobalError(`Could not ${generationMode === 'story' ? 'segment Part ' + partNumber + ' into scenes' : 'generate illustration concepts for Part ' + partNumber}.`);
-        setProcessingMessage(isMultiPartStory ? `Part ${partNumber} processing failed. Ready for next action.` : 'Processing failed.');
-        setIsProcessingGlobal(false);
+        dispatch(setGlobalError(`Could not ${generationMode === 'story' ? 'segment Part ' + partNumber + ' into scenes' : 'generate illustration concepts for Part ' + partNumber}.`));
+        dispatch(setProcessingMessage(isMultiPartStory ? `Part ${partNumber} processing failed. Ready for next action.` : 'Processing failed.'));
+        dispatch(setIsProcessingGlobal(false));
         return;
       }
 
@@ -169,14 +211,18 @@ const App: React.FC = () => {
       if (generationMode === 'story' && sceneTexts.length > MAX_SCENES_WARNING_THRESHOLD && partNumber === 1 && totalParts === 1) {
           const estimatedMinutes = Math.ceil((sceneTexts.length * IMAGE_GENERATION_DELAY_MS) / (1000 * 60));
           if (!window.confirm(`This story part has ${sceneTexts.length} scenes. Generating all images may take over ${estimatedMinutes} minute(s). Do you want to proceed with generating prompts?`)) {
-              setIsProcessingGlobal(false); setProcessingMessage('Prompt generation cancelled.'); return;
+              dispatch(setIsProcessingGlobal(false)); 
+              dispatch(setProcessingMessage('Prompt generation cancelled.')); 
+              return;
           }
       } else if (generationMode === 'story' && totalParts > 1 && partNumber === 1 ) {
            const totalEstimatedScenes = sceneTexts.length * totalParts; // Rough estimate for first part
            if (totalEstimatedScenes > MAX_SCENES_WARNING_THRESHOLD) {
              const estimatedMinutes = Math.ceil((totalEstimatedScenes * IMAGE_GENERATION_DELAY_MS) / (1000 * 60));
              if (!window.confirm(`This story (across ${totalParts} parts) might result in ~${totalEstimatedScenes} scenes. Processing all images may take over ${estimatedMinutes} minute(s). Continue with generating prompts for Part 1?`)) {
-                 setIsProcessingGlobal(false); setProcessingMessage('Prompt generation cancelled.'); return;
+                 dispatch(setIsProcessingGlobal(false)); 
+                 dispatch(setProcessingMessage('Prompt generation cancelled.')); 
+                 return;
              }
            }
       }
@@ -192,10 +238,10 @@ const App: React.FC = () => {
         mode: generationMode,
         relevantCharacters: [], // Will be identified
       }));
-      setSequences((prev: ProcessedSequence[]) => [...prev, ...initialSequencesPart]);
+      dispatch(addSequences(initialSequencesPart));
 
       const itemType = generationMode === 'story' ? 'scenes' : 'concepts';
-      setProcessingMessage(`Part ${partNumber}/${totalParts}: Generating prompts for ${initialSequencesPart.length} ${itemType}...`);
+      dispatch(setProcessingMessage(`Part ${partNumber}/${totalParts}: Generating prompts for ${initialSequencesPart.length} ${itemType}...`));
       
       for (let i = 0; i < initialSequencesPart.length; i++) {
         const currentSeqId = initialSequencesPart[i].id;
@@ -222,91 +268,99 @@ const App: React.FC = () => {
                 characterRace
               );
 
-          setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => 
-            s.id === currentSeqId 
-              ? { 
-                  ...s, 
-                  generatedPrompt: imageGenPrompt, 
-                  currentPrompt: imageGenPrompt, 
-                  status: 'prompt_generated' as const,
-                  relevantCharacters: relevantCharacters
-                } 
-              : s
-          ));
+          dispatch(updateSequence({
+            id: currentSeqId,
+            updates: {
+              generatedPrompt: imageGenPrompt,
+              currentPrompt: imageGenPrompt,
+              status: 'prompt_generated' as const,
+              relevantCharacters: relevantCharacters
+            }
+          }));
         } catch (promptError) {
           console.error("Error generating prompt for scene:", initialSequencesPart[i].originalSceneText, promptError);
-          setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => s.id === currentSeqId ? { ...s, status: 'error' as const, error: `Failed to generate prompt: ${promptError instanceof Error ? promptError.message : String(promptError)}` } : s));
+          dispatch(updateSequence({
+            id: currentSeqId,
+            updates: {
+              status: 'error' as const,
+              error: `Failed to generate prompt: ${promptError instanceof Error ? promptError.message : String(promptError)}`
+            }
+          }));
         }
       }
       
       if (isMultiPartStory && partNumber < totalParts) {
-        setCurrentChunkIndex((prev: number) => prev + 1);
-        setProcessingMessage(`Part ${partNumber} prompts generated. Review/edit, then generate images or process Part ${partNumber + 1}.`);
+        dispatch(incrementChunkIndex());
+        dispatch(setProcessingMessage(`Part ${partNumber} prompts generated. Review/edit, then generate images or process Part ${partNumber + 1}.`));
       } else {
-        setIsMultiPartStory(false); 
-        setProcessingMessage(sequences.some((s: ProcessedSequence) => s.status === 'error' && !s.generatedPrompt) ? 'Prompt generation completed with some errors. Review below.' : 'Prompts generated! Review and edit, then generate images.');
+        dispatch(setIsMultiPartStory(false)); 
+        dispatch(setProcessingMessage(sequences.some((s: ProcessedSequence) => s.status === 'error' && !s.generatedPrompt) ? 'Prompt generation completed with some errors. Review below.' : 'Prompts generated! Review and edit, then generate images.'));
       }
 
     } catch (error) {
       console.error(`Error processing prompts for Part ${partNumber}:`, error);
       const errorMessage = error instanceof Error ? error.message : String(error);
-      setGlobalError(`An error occurred in Part ${partNumber} during prompt generation: ${errorMessage}`);
-      setProcessingMessage(`Error in Part ${partNumber}. Check errors.`);
-       setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => s.partNumber === partNumber && s.status === 'prompting' ? { ...s, status: 'error' as const, error: `Failed during Part ${partNumber} prompt generation: ${errorMessage}` } : s));
+      dispatch(setGlobalError(`An error occurred in Part ${partNumber} during prompt generation: ${errorMessage}`));
+      dispatch(setProcessingMessage(`Error in Part ${partNumber}. Check errors.`));
+      dispatch(updateMultipleSequences(s => 
+        s.partNumber === partNumber && s.status === 'prompting' 
+          ? { ...s, status: 'error' as const, error: `Failed during Part ${partNumber} prompt generation: ${errorMessage}` }
+          : s
+      ));
     } finally {
-      setIsProcessingGlobal(false);
+      dispatch(setIsProcessingGlobal(false));
     }
-  }, [selectedImageStyle, selectedAspectRatio, storyChunks, generationMode, characterRace, characters]);
+  }, [dispatch, selectedImageStyle, selectedAspectRatio, storyChunks, generationMode, characterRace, characters, isMultiPartStory, sequences]);
 
   const handleUpdatePrompt = useCallback((sequenceId: string, newPrompt: string) => {
-    setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => s.id === sequenceId ? {...s, currentPrompt: newPrompt, isPromptEdited: s.generatedPrompt !== newPrompt, status: 'prompt_generated' as const } : s));
-  }, []);
+    dispatch(updateSequencePrompt({ sequenceId, newPrompt }));
+  }, [dispatch]);
 
   const handleGenerateImageForSequence = useCallback(async (sequenceId: string, promptToUse: string) => {
     if (!process.env.API_KEY) {
-      setGlobalError("API Key is missing.");
-      setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => s.id === sequenceId ? { ...s, status: 'error' as const, error: 'API Key missing.' } : s));
+      dispatch(setGlobalError("API Key is missing."));
+      dispatch(updateSequenceStatus({ id: sequenceId, status: 'error', error: 'API Key missing.' }));
       return;
     }
     
-    setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => s.id === sequenceId ? { ...s, status: 'image_generating' as const } : s));
+    dispatch(updateSequenceStatus({ id: sequenceId, status: 'image_generating' }));
     try {
       // Delay is handled by handleGenerateAllPendingImages or individual card can add one if needed for single generations outside batch
       const imageUrl = await generateImageFromPrompt(promptToUse); 
-      setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => s.id === sequenceId ? { ...s, imageUrl: imageUrl, status: 'completed' as const } : s));
+      dispatch(updateSequenceImage({ id: sequenceId, imageUrl }));
     } catch (error) {
       console.error("Error generating image:", error);
       const errorMsg = error instanceof Error ? error.message : String(error);
-      setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => s.id === sequenceId ? { ...s, status: 'error' as const, error: `Image generation failed: ${errorMsg}` } : s));
+      dispatch(updateSequenceStatus({ id: sequenceId, status: 'error', error: `Image generation failed: ${errorMsg}` }));
       if (errorMsg.includes("429") || errorMsg.toLowerCase().includes("quota")) {
-         setGlobalError((prev: string | null) => `${prev ? prev + '\n' : ''}API rate limit potentially hit. Subsequent image requests may fail.`);
+         dispatch(setGlobalError(`API rate limit potentially hit. Subsequent image requests may fail.`));
        }
       throw error; // Re-throw so card can catch if needed
     }
-  }, []);
+  }, [dispatch]);
 
   const handleGenerateAllPendingImages = useCallback(async () => {
     const sequencesToGenerate = sequences.filter((s: ProcessedSequence) => (s.status === 'prompt_generated' || s.status === 'awaiting_image_generation' || (s.status === 'error' && !s.imageUrl && !!s.currentPrompt)) && !s.imageUrl);
     if (sequencesToGenerate.length === 0) {
-      setProcessingMessage("No images pending generation or all prompts have images.");
+      dispatch(setProcessingMessage("No images pending generation or all prompts have images."));
       return;
     }
 
-    setIsProcessingGlobal(true);
-    setProcessingMessage(`Starting batch image generation for ${sequencesToGenerate.length} ${generationMode === 'story' ? 'scenes' : 'concepts'}...`);
+    dispatch(setIsProcessingGlobal(true));
+    dispatch(setProcessingMessage(`Starting batch image generation for ${sequencesToGenerate.length} ${generationMode === 'story' ? 'scenes' : 'concepts'}...`));
     let generatedCount = 0;
 
     for (const seq of sequencesToGenerate) {
       if (!seq.currentPrompt) {
-        setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => s.id === seq.id ? { ...s, status: 'error' as const, error: 'Skipped: Prompt is missing.' } : s));
+        dispatch(updateSequenceStatus({ id: seq.id, status: 'error', error: 'Skipped: Prompt is missing.' }));
         continue;
       }
       try {
         generatedCount++;
         const itemType = generationMode === 'story' ? 'Scene' : 'Concept';
-        setProcessingMessage(`Generating image ${generatedCount}/${sequencesToGenerate.length} (${itemType} ${sequences.findIndex((s: ProcessedSequence) => s.id === seq.id) + 1}). Waiting ${IMAGE_GENERATION_DELAY_MS / 1000}s...`);
+        dispatch(setProcessingMessage(`Generating image ${generatedCount}/${sequencesToGenerate.length} (${itemType} ${sequences.findIndex((s: ProcessedSequence) => s.id === seq.id) + 1}). Waiting ${IMAGE_GENERATION_DELAY_MS / 1000}s...`));
         // Update status to awaiting_image_generation before delay for better UX
-        setSequences((prev: ProcessedSequence[]) => prev.map((s: ProcessedSequence) => s.id === seq.id ? { ...s, status: 'awaiting_image_generation' as const } : s));
+        dispatch(updateSequenceStatus({ id: seq.id, status: 'awaiting_image_generation' }));
         await new Promise(resolve => setTimeout(resolve, IMAGE_GENERATION_DELAY_MS));
         await handleGenerateImageForSequence(seq.id, seq.currentPrompt);
       } catch (error) {
@@ -316,61 +370,61 @@ const App: React.FC = () => {
       }
     }
     const itemType = generationMode === 'story' ? 'scenes' : 'concepts';
-    setProcessingMessage(generatedCount > 0 ? `Batch image generation completed for ${generatedCount} ${itemType}.` : "No images were generated in this batch.");
-    setIsProcessingGlobal(false);
-  }, [sequences, handleGenerateImageForSequence, generationMode]);
+    dispatch(setProcessingMessage(generatedCount > 0 ? `Batch image generation completed for ${generatedCount} ${itemType}.` : "No images were generated in this batch."));
+    dispatch(setIsProcessingGlobal(false));
+  }, [dispatch, sequences, handleGenerateImageForSequence, generationMode]);
 
 
   const handleMainSubmit = useCallback(() => {
     if (!storyInput.trim() && !isMultiPartStory) { // Allow submit if multi-part and just moving to next part
-      setGlobalError("Please enter a story text.");
+      dispatch(setGlobalError("Please enter a story text."));
       return;
     }
     if (storyInput.length > MAX_STORY_LENGTH_TOTAL && !isMultiPartStory) {
-      setGlobalError(`The total story is too long (>${MAX_STORY_LENGTH_TOTAL} characters). Please shorten it.`);
+      dispatch(setGlobalError(`The total story is too long (>${MAX_STORY_LENGTH_TOTAL} characters). Please shorten it.`));
       return;
     }
 
-    setGlobalError(null);
-    setProcessingMessage("Preparing story...");
+    dispatch(clearGlobalError());
+    dispatch(setProcessingMessage("Preparing story..."));
 
     if (isMultiPartStory) { 
         if (currentChunkIndex < storyChunks.length) {
             handleProcessStoryAndGeneratePrompts(storyChunks[currentChunkIndex], currentChunkIndex + 1, storyChunks.length);
         } else {
-            setGlobalError("All parts seem to be processed.");
-            setIsMultiPartStory(false); // Reset
+            dispatch(setGlobalError("All parts seem to be processed."));
+            dispatch(setIsMultiPartStory(false)); // Reset
         }
     } else { 
         // Clear existing characters when starting a new story
-        setCharacters([]);
+        dispatch(clearCharacters());
         
         const chunks = splitStoryIntoChunks(storyInput, CHUNK_CHARACTER_LIMIT);
         if (chunks.length > 1) {
-            setStoryChunks(chunks);
-            setCurrentChunkIndex(0);
-            setIsMultiPartStory(true);
-            setProcessingMessage(`Story divided into ${chunks.length} parts. Click "Process Part 1 Prompts" to begin.`);
-            setSequences([]); 
+            dispatch(setStoryChunks(chunks));
+            dispatch(setCurrentChunkIndex(0));
+            dispatch(setIsMultiPartStory(true));
+            dispatch(setProcessingMessage(`Story divided into ${chunks.length} parts. Click "Process Part 1 Prompts" to begin.`));
+            dispatch(clearSequences()); 
         } else {
-            setIsMultiPartStory(false);
-            setStoryChunks(chunks); 
-            setCurrentChunkIndex(0);
+            dispatch(setIsMultiPartStory(false));
+            dispatch(setStoryChunks(chunks)); 
+            dispatch(setCurrentChunkIndex(0));
             handleProcessStoryAndGeneratePrompts(chunks[0], 1, 1);
         }
     }
-  }, [storyInput, isMultiPartStory, currentChunkIndex, storyChunks, handleProcessStoryAndGeneratePrompts]);
+  }, [dispatch, storyInput, isMultiPartStory, currentChunkIndex, storyChunks, handleProcessStoryAndGeneratePrompts]);
 
 
   const handleDownloadAllImages = useCallback(async () => {
     const completedSequences = sequences.filter(s => s.imageUrl && s.status === 'completed');
     if (completedSequences.length === 0) {
-      setGlobalError("No successfully generated images available to download.");
+      dispatch(setGlobalError("No successfully generated images available to download."));
       return;
     }
 
     const zip = new JSZip();
-    setProcessingMessage("Preparing ZIP file for download...");
+    dispatch(setProcessingMessage("Preparing ZIP file for download..."));
 
     for (let i = 0; i < completedSequences.length; i++) {
       const sequence = completedSequences[i];
@@ -387,14 +441,14 @@ const App: React.FC = () => {
     try {
         const content = await zip.generateAsync({ type: "blob" });
         FileSaver.saveAs(content, "ai_story_visuals.zip");
-        setProcessingMessage("ZIP file download initiated.");
+        dispatch(setProcessingMessage("ZIP file download initiated."));
     } catch (err) {
         console.error("Error generating zip file:", err);
-        setGlobalError("Failed to generate ZIP file.");
-        setProcessingMessage("Failed to create ZIP.");
+        dispatch(setGlobalError("Failed to generate ZIP file."));
+        dispatch(setProcessingMessage("Failed to create ZIP."));
     }
 
-  }, [sequences]);
+  }, [dispatch, sequences]);
 
   const canDownload = sequences.some(s => s.imageUrl && s.status === 'completed') && !isProcessingGlobal;
   const showGenerateAllImagesButton = sequences.some(s => (s.status === 'prompt_generated' || s.status === 'awaiting_image_generation' || (s.status === 'error' && !s.imageUrl && !!s.currentPrompt)) && !s.imageUrl) && !isProcessingGlobal;
@@ -444,7 +498,7 @@ const App: React.FC = () => {
                 className="w-full p-3 bg-gray-700 border border-gray-600 rounded-md shadow-sm focus:ring-2 focus:ring-sky-500 focus:border-sky-500 placeholder-gray-400 text-gray-100 resize-y text-sm"
                 placeholder={isMultiPartStory && currentChunkIndex < storyChunks.length ? `Content for Part ${currentChunkIndex + 1}. Click button below to process its prompts.` : "Paste your full story, script, or text here..."}
                 value={isMultiPartStory && currentChunkIndex < storyChunks.length ? storyChunks[currentChunkIndex] : storyInput}
-                onChange={(e) => !isMultiPartStory ? setStoryInput(e.target.value) : null}
+                onChange={(e) => !isMultiPartStory ? dispatch(setStoryInput(e.target.value)) : null}
                 disabled={isProcessingGlobal || (isMultiPartStory && currentChunkIndex < storyChunks.length)}
                 aria-describedby="storyInputHelp"
               />
@@ -463,7 +517,7 @@ const App: React.FC = () => {
                                 name="generationMode"
                                 value="story"
                                 checked={generationMode === 'story'}
-                                onChange={(e) => setGenerationMode(e.target.value as GenerationMode)}
+                                onChange={(e) => dispatch(setGenerationMode(e.target.value as GenerationMode))}
                                 disabled={isProcessingGlobal}
                                 className="text-sky-500 bg-gray-700 border-gray-600 focus:ring-sky-500 focus:ring-2"
                             />
@@ -477,7 +531,7 @@ const App: React.FC = () => {
                                 name="generationMode"
                                 value="illustration"
                                 checked={generationMode === 'illustration'}
-                                onChange={(e) => setGenerationMode(e.target.value as GenerationMode)}
+                                onChange={(e) => dispatch(setGenerationMode(e.target.value as GenerationMode))}
                                 disabled={isProcessingGlobal}
                                 className="text-sky-500 bg-gray-700 border-gray-600 focus:ring-sky-500 focus:ring-2"
                             />
@@ -501,7 +555,7 @@ const App: React.FC = () => {
                                 Auto-Detected Characters ({characters.length})
                             </label>
                             <button
-                                onClick={() => setCharacters([])}
+                                onClick={() => dispatch(clearCharacters())}
                                 disabled={isProcessingGlobal}
                                 className="text-xs text-red-400 hover:text-red-300 focus:outline-none disabled:opacity-50"
                                 title="Clear detected characters"
@@ -535,7 +589,7 @@ const App: React.FC = () => {
                     <select 
                         id="characterRace"
                         value={characterRace}
-                        onChange={(e) => setCharacterRace(e.target.value as CharacterRace)}
+                        onChange={(e) => dispatch(setCharacterRace(e.target.value as CharacterRace))}
                         disabled={isProcessingGlobal}
                         className="w-full p-3 bg-gray-700 border border-gray-600 rounded-md shadow-sm focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-gray-100 text-sm"
                     >
@@ -551,7 +605,7 @@ const App: React.FC = () => {
                         <select 
                             id="imageStyle"
                             value={selectedImageStyle}
-                            onChange={(e) => setSelectedImageStyle(e.target.value as ImageStyleType)}
+                            onChange={(e) => dispatch(setSelectedImageStyle(e.target.value as ImageStyleType))}
                             disabled={isProcessingGlobal}
                             className="w-full p-3 bg-gray-700 border border-gray-600 rounded-md shadow-sm focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-gray-100 text-sm"
                         >
@@ -563,7 +617,7 @@ const App: React.FC = () => {
                         <select 
                             id="aspectRatio"
                             value={selectedAspectRatio}
-                            onChange={(e) => setSelectedAspectRatio(e.target.value as AspectRatioType)}
+                            onChange={(e) => dispatch(setSelectedAspectRatio(e.target.value as AspectRatioType))}
                             disabled={isProcessingGlobal}
                             className="w-full p-3 bg-gray-700 border border-gray-600 rounded-md shadow-sm focus:ring-2 focus:ring-sky-500 focus:border-sky-500 text-gray-100 text-sm"
                         >
@@ -623,6 +677,16 @@ const App: React.FC = () => {
                     className="px-6 py-3 border border-sky-500 text-base font-medium rounded-md shadow-sm text-sky-300 hover:bg-sky-700 hover:text-white focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-sky-500 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                     Download All Images as ZIP
+                </button>
+            )}
+            {(sequences.length > 0 || storyInput.trim() || characters.length > 0) && (
+                <button
+                    onClick={resetState}
+                    disabled={isProcessingGlobal}
+                    className="px-6 py-3 border border-red-500 text-base font-medium rounded-md shadow-sm text-red-300 hover:bg-red-700 hover:text-white focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Clear all data and reset the application"
+                >
+                    Reset All Data
                 </button>
             )}
         </div>
